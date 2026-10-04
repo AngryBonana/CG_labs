@@ -783,11 +783,11 @@ void submitAndPresent() {
 
 	VkResult result = vkQueuePresentKHR(context.graphics_queue, &present);
 	if (result == VK_ERROR_OUT_OF_DATE_KHR ||
-	    result == VK_SUBOPTIMAL_KHR ||
-	    vk_swapchain_resize_require) {
+		result == VK_SUBOPTIMAL_KHR ||
+		vk_swapchain_resize_require) {
 		rebuildSwapchain(vk_swapchain_resize_width, vk_swapchain_resize_height);
-	} else {
-		std::cerr << "Failed to present Vulkan swapchain image\n";
+	} else if (result != VK_SUCCESS) {
+		std::cerr << "Failed to present Vulkan swapchain image (result=" << result << ")\n";
 	}
 }
 

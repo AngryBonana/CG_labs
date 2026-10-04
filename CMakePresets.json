@@ -35,8 +35,16 @@
 		},
 		{
 			"name": "mingw-debug",
-			"inherits": "debug",
-			"generator": "MinGW Makefiles"
+			"displayName": "MinGW Debug",
+			"description": "Debug build with MinGW",
+			"generator": "MinGW Makefiles",
+			"binaryDir": "${sourceDir}/build-debug",
+			"cacheVariables": {
+				"CMAKE_BUILD_TYPE": "Debug",
+				"CMAKE_C_COMPILER": "C:\\msys64\\ucrt64\\bin\\gcc.exe",
+				"CMAKE_CXX_COMPILER": "C:\\msys64\\ucrt64\\bin\\g++.exe",
+				"CMAKE_MAKE_PROGRAM": "C:\\msys64\\ucrt64\\bin\\mingw32-make.exe"
+			}
 		},
 		{
 			"name": "mingw-release",
