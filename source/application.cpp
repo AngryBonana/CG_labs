@@ -4,6 +4,7 @@
 #include <imgui.h>
 #include <glm/glm.hpp>
 #include <cstdio>
+#include <string>
 
 namespace application {
 
@@ -129,10 +130,35 @@ void update(double time) {
 
     ImGui::Separator();
     ImGui::Text("Material (Blinn-Phong)");
-    ImGui::ColorEdit3("Albedo", &obj.albedo.x);
+
+    {
+        const auto& mats = p.materials;
+        int matIdx = obj.materialIndex;
+        if (matIdx < 0 || matIdx >= (int)mats.size()) matIdx = 0;
+
+        const char* preview = (matIdx < (int)mats.size()) ? mats[matIdx].name.c_str() : "<none>";
+
+        if (ImGui::BeginCombo("Texture (material)", preview)) {
+            for (int m = 0; m < (int)mats.size(); ++m) {
+                bool selected = (m == obj.materialIndex);
+                if (ImGui::Selectable(mats[m].name.c_str(), selected))
+                    obj.materialIndex = m;
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+    }
+
+    ImGui::ColorEdit3("Albedo tint", &obj.albedo.x);
     ImGui::SliderFloat("Alpha", &obj.alpha, 0.0f, 1.0f);
     ImGui::ColorEdit3("Specular color", &obj.specularColor.x);
     ImGui::SliderFloat("Shininess", &obj.shininess, 1.0f, 256.0f);
+    ImGui::SliderFloat("UV scale", &obj.uvScale, 0.1f, 8.0f);
+
+    ImGui::Separator();
+    ImGui::Text("Non-trivial sampling");
+    ImGui::Checkbox("Enable (push constant)", &obj.nonTrivialSampling);
+    ImGui::TextDisabled("Modulated color + multi-tap + time-animated");
 
     ImGui::Separator();
     ImGui::Text("Animation (Object %d)", p.selectedObject);

@@ -3,14 +3,24 @@
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
+#include <string>
 #include <vector>
 
 #include "graphics_internal.hpp"
 #include "geometry.hpp"
 #include "uniform.hpp"
+#include "texture.hpp"
 
 namespace shape_renderer
 {
+
+    struct Material {
+        std::string name;
+        texture::Texture albedo;
+        texture::Texture specular;
+        texture::Texture emissive;
+        VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+    };
 
     struct GameObject
     {
@@ -18,20 +28,22 @@ namespace shape_renderer
         glm::vec3 rotation{0.0f};
         glm::vec3 scale{1.0f};
 
-        glm::vec3 albedo{1.0f, 0.6f, 0.2f};
+        glm::vec3 albedo{1.0f};
         float alpha = 1.0f;
         glm::vec3 specularColor{1.0f};
         float shininess = 32.0f;
+
+        int materialIndex = 0;
+        float uvScale = 1.0f;
+
+        bool nonTrivialSampling = false;
 
         bool animating = false;
         float animSpeed = 1.0f;
         float pathRadius = 1.5f;
         double animTime = 0.0;
 
-        VkBuffer uniformBuffer = VK_NULL_HANDLE;
-        VmaAllocation uniformAlloc = VK_NULL_HANDLE;
-        void *uniformMapped = nullptr;
-        VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+        uint32_t uboDynamicOffset = 0;
 
         glm::mat4 lastModel{1.0f};
     };
@@ -66,7 +78,6 @@ namespace shape_renderer
         float distance = 6.0f;
         float fovDeg = 45.0f;
         glm::vec3 target{0.0f};
-
         bool usePerspective = true;
         float orthoHalfHeight = 3.0f;
     };
@@ -87,20 +98,33 @@ namespace shape_renderer
 
         VkBuffer sceneUBO = VK_NULL_HANDLE;
         VmaAllocation sceneUBOAlloc = VK_NULL_HANDLE;
-        void *sceneUBOMapped = nullptr;
+        void* sceneUBOMapped = nullptr;
 
         VkBuffer pointSSBO = VK_NULL_HANDLE;
         VmaAllocation pointSSBOAlloc = VK_NULL_HANDLE;
-        void *pointSSBOMapped = nullptr;
+        void* pointSSBOMapped = nullptr;
         VkDeviceSize pointSSBOSize = 0;
 
         VkBuffer spotSSBO = VK_NULL_HANDLE;
         VmaAllocation spotSSBOAlloc = VK_NULL_HANDLE;
-        void *spotSSBOMapped = nullptr;
+        void* spotSSBOMapped = nullptr;
         VkDeviceSize spotSSBOSize = 0;
 
         VkDescriptorSetLayout modelSetLayout = VK_NULL_HANDLE;
         VkDescriptorPool modelPool = VK_NULL_HANDLE;
+        VkDescriptorSet modelSet = VK_NULL_HANDLE;
+        VkBuffer modelUBOBuffer = VK_NULL_HANDLE;
+        VmaAllocation modelUBOAlloc = VK_NULL_HANDLE;
+        void* modelUBOMapped = nullptr;
+        VkDeviceSize modelUBOStride = 0;
+
+        VkDescriptorSetLayout materialSetLayout = VK_NULL_HANDLE;
+        VkDescriptorPool materialPool = VK_NULL_HANDLE;
+        std::vector<Material> materials;
+        int selectedMaterialForObject = 0;
+
+        texture::Texture blackTexture;
+        texture::Texture whiteTexture;
 
         VkBuffer vertexBuffer = VK_NULL_HANDLE;
         VmaAllocation vertexAlloc = VK_NULL_HANDLE;
@@ -116,7 +140,7 @@ namespace shape_renderer
 
         VkBuffer coneVertexBuffer = VK_NULL_HANDLE;
         VmaAllocation coneVertexAlloc = VK_NULL_HANDLE;
-        void *coneVertexMapped = nullptr;
+        void* coneVertexMapped = nullptr;
         uint32_t coneVertexCapacity = 0;
         uint32_t coneVertexWritten = 0;
 
@@ -140,6 +164,8 @@ namespace shape_renderer
 
         bool showLightGizmos = true;
 
+        double totalTime = 0.0;
+
         static constexpr uint32_t MAX_LIGHTS = 64;
     };
 
@@ -147,6 +173,6 @@ namespace shape_renderer
     void shutdown();
     void update(double dt);
     void record(VkCommandBuffer cmd, uint32_t imageIndex);
-    Resources &params();
+    Resources& params();
 
-} // namespace shape_renderer
+}

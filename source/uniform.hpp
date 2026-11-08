@@ -2,8 +2,8 @@
 
 #include <glm/glm.hpp>
 
-
-struct SceneUBO {
+struct SceneUBO
+{
     alignas(16) glm::mat4 view;
     alignas(16) glm::mat4 proj;
     alignas(16) glm::vec4 cameraPos;
@@ -13,17 +13,18 @@ struct SceneUBO {
     alignas(16) glm::vec4 dirColor;
 
     alignas(16) glm::vec4 lightCounts;
+    alignas(16) glm::vec4 time;
 };
 
-
-struct PointLight {
+struct PointLight
+{
     alignas(16) glm::vec4 position;
     alignas(16) glm::vec4 color;
     alignas(16) glm::vec4 params;
 };
 
-
-struct SpotLight {
+struct SpotLight
+{
     alignas(16) glm::vec4 position;
     alignas(16) glm::vec4 direction;
     alignas(16) glm::vec4 color;
@@ -31,10 +32,16 @@ struct SpotLight {
     alignas(16) glm::vec4 params;
 };
 
-
-struct ModelUBO {
+struct ModelUBO
+{
     alignas(16) glm::mat4 model;
     alignas(16) glm::mat4 normalMatrix;
     alignas(16) glm::vec4 albedo;
     alignas(16) glm::vec4 specularColor;
+    alignas(16) glm::vec4 flags;
+};
+
+struct ShapePushConstants
+{
+    glm::vec4 params;
 };

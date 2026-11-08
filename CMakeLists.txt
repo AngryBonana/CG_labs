@@ -3,7 +3,13 @@ include(FetchContent)
 
 project(vulkan-starter-app LANGUAGES C CXX)
 
-add_executable(${PROJECT_NAME} source/main.cpp source/graphics_internal.cpp source/application.cpp source/shape_renderer.cpp)
+add_executable(${PROJECT_NAME}
+	source/main.cpp
+	source/graphics_internal.cpp
+	source/application.cpp
+	source/shape_renderer.cpp
+	source/texture.cpp
+)
 
 if(LINUX)
 	target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
@@ -54,6 +60,13 @@ FetchContent_Declare(
 	GIT_TAG 1.0.1
 )
 
+# stb_image для загрузки PNG/JPG/... (header-only, IMAGE_IMPLEMENTATION определяется в texture.cpp)
+FetchContent_Declare(
+	stb
+	GIT_REPOSITORY https://github.com/nothings/stb.git
+	GIT_TAG master
+)
+
 find_package(Vulkan REQUIRED)
 
 set(GLFW_LIBRARY_TYPE STATIC)
@@ -67,6 +80,7 @@ FetchContent_MakeAvailable(
 	VulkanMemoryAllocator
 	imgui
 	glm
+	stb
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
@@ -77,7 +91,12 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 	glm::glm
 )
 
-target_include_directories(${PROJECT_NAME} PRIVATE ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+target_include_directories(${PROJECT_NAME} PRIVATE
+	${imgui_SOURCE_DIR}
+	${imgui_SOURCE_DIR}/backends
+	${stb_SOURCE_DIR}          # здесь лежит stb_image.h
+)
+
 target_sources(${PROJECT_NAME} PRIVATE
 	${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
 	${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
@@ -116,3 +135,22 @@ if(GLSLC_FOUND)
 	add_custom_target(shaders DEPENDS ${_SHADER_BINARIES})
 	add_dependencies(${PROJECT_NAME} shaders)
 endif()
+
+
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+	COMMAND ${CMAKE_COMMAND} -E copy_directory
+		${CMAKE_SOURCE_DIR}/shaders $<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders
+	COMMENT "Copying shaders next to executable"
+)
+
+if(EXISTS ${CMAKE_SOURCE_DIR}/assets)
+	add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_directory
+			${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:${PROJECT_NAME}>/assets
+		COMMENT "Copying assets next to executable"
+	)
+endif()
+
+set_target_properties(${PROJECT_NAME} PROPERTIES
+	VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+)

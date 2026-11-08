@@ -53,10 +53,12 @@ namespace shape_renderer
             ai.usage = VMA_MEMORY_USAGE_AUTO;
             if (mapped)
             {
-                ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+                ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                           VMA_ALLOCATION_CREATE_MAPPED_BIT;
             }
             VmaAllocationInfo info{};
-            vmaCreateBuffer(graphics::internal::context.allocator, &bi, &ai, &buffer, &alloc, &info);
+            vmaCreateBuffer(graphics::internal::context.allocator, &bi, &ai,
+                            &buffer, &alloc, &info);
             if (mapped)
                 *mapped = info.pMappedData;
         }
@@ -74,14 +76,18 @@ namespace shape_renderer
             void *vStageMap = nullptr;
             void *iStageMap = nullptr;
 
-            createBuffer(vSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, vStage, vStageAlloc, &vStageMap);
-            createBuffer(iSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, iStage, iStageAlloc, &iStageMap);
+            createBuffer(vSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                         vStage, vStageAlloc, &vStageMap);
+            createBuffer(iSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                         iStage, iStageAlloc, &iStageMap);
             std::memcpy(vStageMap, mesh.vertices.data(), vSize);
             std::memcpy(iStageMap, mesh.indices.data(), iSize);
 
-            createBuffer(vSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            createBuffer(vSize,
+                         VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                          vBuf, vAlloc);
-            createBuffer(iSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            createBuffer(iSize,
+                         VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                          iBuf, iAlloc);
 
             VkCommandPoolCreateInfo cpci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -114,6 +120,37 @@ namespace shape_renderer
             vkDestroyCommandPool(ctx.device, tmpPool, nullptr);
             vmaDestroyBuffer(ctx.allocator, vStage, vStageAlloc);
             vmaDestroyBuffer(ctx.allocator, iStage, iStageAlloc);
+        }
+
+        VkDeviceSize alignedSize(VkDeviceSize s, VkDeviceSize align)
+        {
+            return (s + align - 1) & ~(align - 1);
+        }
+
+        Material createMaterial(const std::string &name,
+                                const std::string &albedoPath,
+                                const std::string &specularPath,
+                                const std::string &emissivePath)
+        {
+            Material m;
+            m.name = name;
+
+            if (!albedoPath.empty())
+                texture::loadFromFile(albedoPath, m.albedo);
+            if (m.albedo.image == VK_NULL_HANDLE)
+                m.albedo = res.whiteTexture;
+
+            if (!specularPath.empty())
+                texture::loadFromFile(specularPath, m.specular);
+            if (m.specular.image == VK_NULL_HANDLE)
+                m.specular = res.blackTexture;
+
+            if (!emissivePath.empty())
+                texture::loadFromFile(emissivePath, m.emissive);
+            if (m.emissive.image == VK_NULL_HANDLE)
+                m.emissive = res.blackTexture;
+
+            return m;
         }
 
     } // namespace
@@ -150,7 +187,7 @@ namespace shape_renderer
 
         VkDescriptorSetLayoutBinding modelBinding{};
         modelBinding.binding = 0;
-        modelBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        modelBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         modelBinding.descriptorCount = 1;
         modelBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
@@ -163,11 +200,28 @@ namespace shape_renderer
             return false;
         }
 
+        VkDescriptorSetLayoutBinding matBindings[3]{};
+        for (int i = 0; i < 3; ++i)
+        {
+            matBindings[i].binding = static_cast<uint32_t>(i);
+            matBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            matBindings[i].descriptorCount = 1;
+            matBindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        }
+        VkDescriptorSetLayoutCreateInfo matlci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        matlci.bindingCount = 3;
+        matlci.pBindings = matBindings;
+        if (vkCreateDescriptorSetLayout(ctx.device, &matlci, nullptr, &res.materialSetLayout) != VK_SUCCESS)
+        {
+            std::cerr << "Failed to create material descriptor set layout\n";
+            return false;
+        }
+
         createBuffer(sizeof(SceneUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                      res.sceneUBO, res.sceneUBOAlloc, &res.sceneUBOMapped);
 
         res.pointSSBOSize = sizeof(PointLight) * Resources::MAX_LIGHTS;
-        res.spotSSBOSize = sizeof(SpotLight) * Resources::MAX_LIGHTS;
+        res.spotSSBOSize  = sizeof(SpotLight)  * Resources::MAX_LIGHTS;
 
         createBuffer(res.pointSSBOSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                      res.pointSSBO, res.pointSSBOAlloc, &res.pointSSBOMapped);
@@ -226,11 +280,18 @@ namespace shape_renderer
 
         vkUpdateDescriptorSets(ctx.device, 3, sceneWrites, 0, nullptr);
 
-        // ---------- Model descriptor pool/set ----------
-        VkDescriptorPoolSize modelPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                                           Resources::MAX_OBJECTS};
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(ctx.physical_device, &props);
+        VkDeviceSize align = props.limits.minUniformBufferOffsetAlignment;
+        res.modelUBOStride = alignedSize(sizeof(ModelUBO), align);
+
+        VkDeviceSize totalSize = res.modelUBOStride * Resources::MAX_OBJECTS;
+        createBuffer(totalSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                     res.modelUBOBuffer, res.modelUBOAlloc, &res.modelUBOMapped);
+
+        VkDescriptorPoolSize modelPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1};
         VkDescriptorPoolCreateInfo mpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        mpci.maxSets = Resources::MAX_OBJECTS;
+        mpci.maxSets = 1;
         mpci.poolSizeCount = 1;
         mpci.pPoolSizes = &modelPoolSize;
         if (vkCreateDescriptorPool(ctx.device, &mpci, nullptr, &res.modelPool) != VK_SUCCESS)
@@ -239,41 +300,115 @@ namespace shape_renderer
             return false;
         }
 
-        std::vector<VkDescriptorSetLayout> layouts(Resources::MAX_OBJECTS, res.modelSetLayout);
         VkDescriptorSetAllocateInfo mdai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         mdai.descriptorPool = res.modelPool;
-        mdai.descriptorSetCount = Resources::MAX_OBJECTS;
-        mdai.pSetLayouts = layouts.data();
-
-        std::vector<VkDescriptorSet> modelSets(Resources::MAX_OBJECTS);
-        if (vkAllocateDescriptorSets(ctx.device, &mdai, modelSets.data()) != VK_SUCCESS)
+        mdai.descriptorSetCount = 1;
+        mdai.pSetLayouts = &res.modelSetLayout;
+        if (vkAllocateDescriptorSets(ctx.device, &mdai, &res.modelSet) != VK_SUCCESS)
         {
-            std::cerr << "Failed to allocate model descriptor sets\n";
+            std::cerr << "Failed to allocate model descriptor set\n";
             return false;
+        }
+
+        VkDescriptorBufferInfo modelInfo{res.modelUBOBuffer, 0, res.modelUBOStride};
+        VkWriteDescriptorSet mwds{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        mwds.dstSet = res.modelSet;
+        mwds.dstBinding = 0;
+        mwds.descriptorCount = 1;
+        mwds.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        mwds.pBufferInfo = &modelInfo;
+        vkUpdateDescriptorSets(ctx.device, 1, &mwds, 0, nullptr);
+
+        for (int i = 0; i < Resources::MAX_OBJECTS; ++i)
+            res.objects[i].uboDynamicOffset = static_cast<uint32_t>(res.modelUBOStride * i);
+
+        res.blackTexture = texture::makeSolid1x1(0, 0, 0, 255);
+        res.whiteTexture = texture::makeSolid1x1(255, 255, 255, 255);
+
+        res.materials.clear();
+        res.materials.push_back(createMaterial("Checker (albedo only)",
+                                               "assets/checker.png", "", ""));
+        res.materials.push_back(createMaterial("Bricks + spec",
+                                               "assets/bricks.png",
+                                               "assets/specular_spots.png", ""));
+        res.materials.push_back(createMaterial("Metal + emissive",
+                                               "assets/metal.png",
+                                               "",
+                                               "assets/emissive.png"));
+
+        {
+            texture::Texture procSpec{};
+            texture::generateSpecularSpots(256, procSpec);
+            texture::Texture procEmis{};
+            texture::generatePerlinEmissive(256, procEmis);
+
+            Material m;
+            m.name = "Procedural (spec+emissive)";
+            m.albedo   = res.whiteTexture;
+            m.specular = procSpec;
+            m.emissive = procEmis;
+            res.materials.push_back(m);
+        }
+
+        VkDescriptorPoolSize matPoolSize{
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            static_cast<uint32_t>(res.materials.size() * 3)};
+        VkDescriptorPoolCreateInfo matpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        matpci.maxSets = static_cast<uint32_t>(res.materials.size());
+        matpci.poolSizeCount = 1;
+        matpci.pPoolSizes = &matPoolSize;
+        if (vkCreateDescriptorPool(ctx.device, &matpci, nullptr, &res.materialPool) != VK_SUCCESS)
+        {
+            std::cerr << "Failed to create material descriptor pool\n";
+            return false;
+        }
+
+        std::vector<VkDescriptorSetLayout> matLayouts(res.materials.size(), res.materialSetLayout);
+        std::vector<VkDescriptorSet> matSets(res.materials.size());
+        VkDescriptorSetAllocateInfo mdsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        mdsai.descriptorPool = res.materialPool;
+        mdsai.descriptorSetCount = static_cast<uint32_t>(res.materials.size());
+        mdsai.pSetLayouts = matLayouts.data();
+        if (vkAllocateDescriptorSets(ctx.device, &mdsai, matSets.data()) != VK_SUCCESS)
+        {
+            std::cerr << "Failed to allocate material descriptor sets\n";
+            return false;
+        }
+
+        for (size_t i = 0; i < res.materials.size(); ++i)
+        {
+            auto &m = res.materials[i];
+            m.descriptorSet = matSets[i];
+
+            VkDescriptorImageInfo ai{m.albedo.sampler,   m.albedo.view,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            VkDescriptorImageInfo si{m.specular.sampler, m.specular.view,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            VkDescriptorImageInfo ei{m.emissive.sampler, m.emissive.view,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+
+            VkWriteDescriptorSet w[3]{};
+            for (int k = 0; k < 3; ++k)
+            {
+                w[k].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                w[k].dstSet = m.descriptorSet;
+                w[k].dstBinding = static_cast<uint32_t>(k);
+                w[k].descriptorCount = 1;
+                w[k].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            }
+            w[0].pImageInfo = &ai;
+            w[1].pImageInfo = &si;
+            w[2].pImageInfo = &ei;
+            vkUpdateDescriptorSets(ctx.device, 3, w, 0, nullptr);
         }
 
         for (int i = 0; i < Resources::MAX_OBJECTS; ++i)
         {
             auto &obj = res.objects[i];
-            obj.descriptorSet = modelSets[i];
-
-            createBuffer(sizeof(ModelUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                         obj.uniformBuffer, obj.uniformAlloc, &obj.uniformMapped);
-
-            VkDescriptorBufferInfo dbi{obj.uniformBuffer, 0, sizeof(ModelUBO)};
-            VkWriteDescriptorSet wds{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            wds.dstSet = obj.descriptorSet;
-            wds.dstBinding = 0;
-            wds.descriptorCount = 1;
-            wds.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            wds.pBufferInfo = &dbi;
-            vkUpdateDescriptorSets(ctx.device, 1, &wds, 0, nullptr);
-
             if (i > 0)
             {
                 obj.position = glm::vec3(
-                    (i == 1) ? 2.0f : (i == 2) ? -2.0f
-                                               : 0.0f,
+                    (i == 1) ? 2.0f : (i == 2) ? -2.0f : 0.0f,
                     0.0f,
                     (i == 3) ? 2.0f : 0.0f);
                 obj.albedo = glm::vec3(
@@ -281,11 +416,14 @@ namespace shape_renderer
                     (i == 2) ? 1.0f : 0.2f,
                     (i == 3) ? 1.0f : 0.2f);
             }
+            obj.materialIndex = std::min<int>(i, static_cast<int>(res.materials.size()) - 1);
         }
+        res.objects[0].nonTrivialSampling = true;
 
         MeshData mesh = makePyramid();
         res.indexCount = static_cast<uint32_t>(mesh.indices.size());
-        uploadMesh(mesh, res.vertexBuffer, res.vertexAlloc, res.indexBuffer, res.indexAlloc);
+        uploadMesh(mesh, res.vertexBuffer, res.vertexAlloc,
+                   res.indexBuffer, res.indexAlloc);
 
         MeshData cube = makeCube();
         res.cubeIndexCount = static_cast<uint32_t>(cube.indices.size());
@@ -341,7 +479,8 @@ namespace shape_renderer
         msci.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
         VkPipelineColorBlendAttachmentState cbas{};
-        cbas.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        cbas.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
         cbas.blendEnable = VK_TRUE;
         cbas.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
         cbas.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
@@ -359,10 +498,19 @@ namespace shape_renderer
         dssci.dynamicStateCount = 2;
         dssci.pDynamicStates = dynStates;
 
-        VkDescriptorSetLayout setLayouts[2] = {res.sceneSetLayout, res.modelSetLayout};
+        VkPushConstantRange pcRange{};
+        pcRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        pcRange.offset = 0;
+        pcRange.size = sizeof(ShapePushConstants);
+
+        VkDescriptorSetLayout shapeSetLayouts[3] = {
+            res.sceneSetLayout, res.modelSetLayout, res.materialSetLayout};
+
         VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        plci.setLayoutCount = 2;
-        plci.pSetLayouts = setLayouts;
+        plci.setLayoutCount = 3;
+        plci.pSetLayouts = shapeSetLayouts;
+        plci.pushConstantRangeCount = 1;
+        plci.pPushConstantRanges = &pcRange;
         if (vkCreatePipelineLayout(ctx.device, &plci, nullptr, &res.pipelineLayout) != VK_SUCCESS)
         {
             std::cerr << "Failed to create pipeline layout\n";
@@ -404,9 +552,7 @@ namespace shape_renderer
         res.pipeline = createShapePipeline(VK_TRUE);
         res.transparentPipeline = createShapePipeline(VK_FALSE);
         if (res.pipeline == VK_NULL_HANDLE || res.transparentPipeline == VK_NULL_HANDLE)
-        {
             return false;
-        }
 
         vkDestroyShaderModule(ctx.device, vert, nullptr);
         vkDestroyShaderModule(ctx.device, frag, nullptr);
@@ -426,16 +572,16 @@ namespace shape_renderer
         vstages[1].module = vfrag;
         vstages[1].pName = "main";
 
-        VkPushConstantRange pushRange{};
-        pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-        pushRange.offset = 0;
-        pushRange.size = sizeof(glm::mat4) + sizeof(glm::vec4);
+        VkPushConstantRange visPushRange{};
+        visPushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        visPushRange.offset = 0;
+        visPushRange.size = sizeof(glm::mat4) + sizeof(glm::vec4);
 
         VkPipelineLayoutCreateInfo vplci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         vplci.setLayoutCount = 1;
         vplci.pSetLayouts = &res.sceneSetLayout;
         vplci.pushConstantRangeCount = 1;
-        vplci.pPushConstantRanges = &pushRange;
+        vplci.pPushConstantRanges = &visPushRange;
         if (vkCreatePipelineLayout(ctx.device, &vplci, nullptr, &res.visPipelineLayout) != VK_SUCCESS)
         {
             std::cerr << "Failed to create vis pipeline layout\n";
@@ -492,6 +638,8 @@ namespace shape_renderer
     {
         auto &ctx = graphics::internal::context;
 
+        res.totalTime += dt;
+
         for (int i = 0; i < res.objectCount; ++i)
         {
             auto &obj = res.objects[i];
@@ -542,6 +690,7 @@ namespace shape_renderer
         scene.dirDirection = glm::vec4(glm::normalize(res.dirLightDirection), 0.0f);
         scene.dirColor = glm::vec4(res.dirLightColor, res.dirLightIntensity);
         scene.lightCounts = glm::vec4((float)pc, (float)sc, 0.0f, 0.0f);
+        scene.time = glm::vec4((float)res.totalTime, 0.0f, 0.0f, 0.0f);
         std::memcpy(res.sceneUBOMapped, &scene, sizeof(scene));
 
         auto *pOut = static_cast<PointLight *>(res.pointSSBOMapped);
@@ -583,6 +732,7 @@ namespace shape_renderer
             sOut[i].params = glm::vec4(0.0f);
         }
 
+        auto *base = static_cast<uint8_t *>(res.modelUBOMapped);
         for (int i = 0; i < res.objectCount; ++i)
         {
             auto &obj = res.objects[i];
@@ -595,7 +745,8 @@ namespace shape_renderer
                 float t = static_cast<float>(obj.animTime);
                 float blend = std::min(t, 1.0f);
                 model = glm::translate(model,
-                                       glm::vec3(std::cos(t) * obj.pathRadius * blend, 0.0f,
+                                       glm::vec3(std::cos(t) * obj.pathRadius * blend,
+                                                 0.0f,
                                                  std::sin(t) * obj.pathRadius * blend));
             }
             model = glm::rotate(model, glm::radians(obj.rotation.x), glm::vec3(1, 0, 0));
@@ -610,7 +761,13 @@ namespace shape_renderer
             mubo.normalMatrix = glm::transpose(glm::inverse(model));
             mubo.albedo = glm::vec4(obj.albedo, obj.alpha);
             mubo.specularColor = glm::vec4(obj.specularColor, obj.shininess);
-            std::memcpy(obj.uniformMapped, &mubo, sizeof(mubo));
+            mubo.flags = glm::vec4(obj.nonTrivialSampling ? 1.0f : 0.0f,
+                                   obj.uvScale,
+                                   static_cast<float>(res.totalTime),
+                                   0.0f);
+
+            ModelUBO *dst = reinterpret_cast<ModelUBO *>(base + obj.uboDynamicOffset);
+            std::memcpy(dst, &mubo, sizeof(mubo));
         }
 
         res.coneVertexWritten = 0;
@@ -670,8 +827,24 @@ namespace shape_renderer
 
         auto drawOne = [&](int i)
         {
+            auto &obj = res.objects[i];
+
+            uint32_t dynOffset = obj.uboDynamicOffset;
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, res.pipelineLayout,
-                                    1, 1, &res.objects[i].descriptorSet, 0, nullptr);
+                                    1, 1, &res.modelSet, 1, &dynOffset);
+
+            int matIdx = glm::clamp(obj.materialIndex, 0,
+                                    static_cast<int>(res.materials.size()) - 1);
+            const Material &mat = res.materials[matIdx];
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, res.pipelineLayout,
+                                    2, 1, &mat.descriptorSet, 0, nullptr);
+
+            ShapePushConstants pcs{};
+            pcs.params = glm::vec4(obj.nonTrivialSampling ? 1.0f : 0.0f,
+                                   static_cast<float>(res.totalTime), 0.0f, 0.0f);
+            vkCmdPushConstants(cmd, res.pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(pcs), &pcs);
+
             vkCmdDrawIndexed(cmd, res.indexCount, 1, 0, 0, 0);
         };
 
@@ -769,14 +942,40 @@ namespace shape_renderer
             vkDestroyPipelineLayout(ctx.device, res.pipelineLayout, nullptr);
         if (res.visPipelineLayout)
             vkDestroyPipelineLayout(ctx.device, res.visPipelineLayout, nullptr);
-        if (res.scenePool)
-            vkDestroyDescriptorPool(ctx.device, res.scenePool, nullptr);
+
+        for (auto &m : res.materials)
+        {
+            auto isService = [&](const texture::Texture &t) {
+                return t.image == res.whiteTexture.image || t.image == res.blackTexture.image;
+            };
+            if (m.albedo.image && !isService(m.albedo))
+                texture::destroy(m.albedo);
+            if (m.specular.image && !isService(m.specular))
+                texture::destroy(m.specular);
+            if (m.emissive.image && !isService(m.emissive))
+                texture::destroy(m.emissive);
+        }
+        res.materials.clear();
+
+        texture::destroy(res.blackTexture);
+        texture::destroy(res.whiteTexture);
+
+        if (res.materialPool)
+            vkDestroyDescriptorPool(ctx.device, res.materialPool, nullptr);
+        if (res.materialSetLayout)
+            vkDestroyDescriptorSetLayout(ctx.device, res.materialSetLayout, nullptr);
+
         if (res.modelPool)
             vkDestroyDescriptorPool(ctx.device, res.modelPool, nullptr);
-        if (res.sceneSetLayout)
-            vkDestroyDescriptorSetLayout(ctx.device, res.sceneSetLayout, nullptr);
         if (res.modelSetLayout)
             vkDestroyDescriptorSetLayout(ctx.device, res.modelSetLayout, nullptr);
+        if (res.modelUBOBuffer)
+            vmaDestroyBuffer(ctx.allocator, res.modelUBOBuffer, res.modelUBOAlloc);
+
+        if (res.scenePool)
+            vkDestroyDescriptorPool(ctx.device, res.scenePool, nullptr);
+        if (res.sceneSetLayout)
+            vkDestroyDescriptorSetLayout(ctx.device, res.sceneSetLayout, nullptr);
 
         if (res.sceneUBO)
             vmaDestroyBuffer(ctx.allocator, res.sceneUBO, res.sceneUBOAlloc);
@@ -784,13 +983,6 @@ namespace shape_renderer
             vmaDestroyBuffer(ctx.allocator, res.pointSSBO, res.pointSSBOAlloc);
         if (res.spotSSBO)
             vmaDestroyBuffer(ctx.allocator, res.spotSSBO, res.spotSSBOAlloc);
-
-        for (int i = 0; i < Resources::MAX_OBJECTS; ++i)
-        {
-            auto &obj = res.objects[i];
-            if (obj.uniformBuffer)
-                vmaDestroyBuffer(ctx.allocator, obj.uniformBuffer, obj.uniformAlloc);
-        }
 
         if (res.vertexBuffer)
             vmaDestroyBuffer(ctx.allocator, res.vertexBuffer, res.vertexAlloc);
