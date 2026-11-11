@@ -156,7 +156,7 @@ namespace shape_renderer
     } // namespace
 
 
-    bool initialize()
+        bool initialize()
     {
         auto &ctx = graphics::internal::context;
 
@@ -285,7 +285,7 @@ namespace shape_renderer
         VkDeviceSize align = props.limits.minUniformBufferOffsetAlignment;
         res.modelUBOStride = alignedSize(sizeof(ModelUBO), align);
 
-        VkDeviceSize totalSize = res.modelUBOStride * Resources::MAX_OBJECTS;
+        VkDeviceSize totalSize = res.modelUBOStride * (Resources::MAX_OBJECTS + 1);
         createBuffer(totalSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                      res.modelUBOBuffer, res.modelUBOAlloc, &res.modelUBOMapped);
 
@@ -321,6 +321,9 @@ namespace shape_renderer
 
         for (int i = 0; i < Resources::MAX_OBJECTS; ++i)
             res.objects[i].uboDynamicOffset = static_cast<uint32_t>(res.modelUBOStride * i);
+
+        res.floorUboDynamicOffset =
+            static_cast<uint32_t>(res.modelUBOStride * Resources::MAX_OBJECTS);
 
         res.blackTexture = texture::makeSolid1x1(0, 0, 0, 255);
         res.whiteTexture = texture::makeSolid1x1(255, 255, 255, 255);
@@ -410,11 +413,11 @@ namespace shape_renderer
                 obj.position = glm::vec3(
                     (i == 1) ? 2.0f : (i == 2) ? -2.0f : 0.0f,
                     0.0f,
-                    (i == 3) ? 2.0f : 0.0f);
+                    0.0f);
                 obj.albedo = glm::vec3(
                     (i == 1) ? 1.0f : 0.2f,
                     (i == 2) ? 1.0f : 0.2f,
-                    (i == 3) ? 1.0f : 0.2f);
+                    0.2f);
             }
             obj.materialIndex = std::min<int>(i, static_cast<int>(res.materials.size()) - 1);
         }
@@ -429,6 +432,20 @@ namespace shape_renderer
         res.cubeIndexCount = static_cast<uint32_t>(cube.indices.size());
         uploadMesh(cube, res.cubeVertexBuffer, res.cubeVertexAlloc,
                    res.cubeIndexBuffer, res.cubeIndexAlloc);
+
+        {
+            MeshData plane = makePlane(10.0f);
+            res.planeIndexCount = static_cast<uint32_t>(plane.indices.size());
+            uploadMesh(plane, res.planeVertexBuffer, res.planeVertexAlloc,
+                       res.planeIndexBuffer, res.planeIndexAlloc);
+
+            res.floorDescriptorSet = res.materials[0].descriptorSet;
+
+            glm::mat4 fm = glm::mat4(1.0f);
+            fm = glm::translate(fm, glm::vec3(0.0f, -1.0f, 0.0f));
+            fm = glm::scale(fm, glm::vec3(1.0f));
+            res.floorModel = fm;
+        }
 
         const uint32_t coneVertsPerSpot = 16u * 4u;
         res.coneVertexCapacity = coneVertsPerSpot * Resources::MAX_LIGHTS;
@@ -633,7 +650,6 @@ namespace shape_renderer
         return true;
     }
 
-
     void update(double dt)
     {
         auto &ctx = graphics::internal::context;
@@ -770,6 +786,21 @@ namespace shape_renderer
             std::memcpy(dst, &mubo, sizeof(mubo));
         }
 
+        {
+            ModelUBO mubo{};
+            mubo.model = res.floorModel;
+            mubo.normalMatrix = glm::transpose(glm::inverse(res.floorModel));
+            mubo.albedo = glm::vec4(1.0f);
+            mubo.specularColor = glm::vec4(1.0f, 1.0f, 1.0f, 16.0f);
+            mubo.flags = glm::vec4(0.0f, 20.0f,
+                                   static_cast<float>(res.totalTime),
+                                   0.0f);
+
+            uint8_t *base2 = static_cast<uint8_t *>(res.modelUBOMapped);
+            ModelUBO *dst = reinterpret_cast<ModelUBO *>(base2 + res.floorUboDynamicOffset);
+            std::memcpy(dst, &mubo, sizeof(mubo));
+        }
+
         res.coneVertexWritten = 0;
         if (res.showLightGizmos && !res.spotLights.empty() && res.coneVertexMapped)
         {
@@ -807,8 +838,25 @@ namespace shape_renderer
 
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, res.pipelineLayout,
                                 0, 1, &res.sceneSet, 0, nullptr);
-        vkCmdBindVertexBuffers(cmd, 0, 1, &res.vertexBuffer, offsets);
-        vkCmdBindIndexBuffer(cmd, res.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+
+        {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, res.pipeline);
+
+            uint32_t dynOffset = res.floorUboDynamicOffset;
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, res.pipelineLayout,
+                                    1, 1, &res.modelSet, 1, &dynOffset);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, res.pipelineLayout,
+                                    2, 1, &res.floorDescriptorSet, 0, nullptr);
+
+            ShapePushConstants pcs{};
+            pcs.params = glm::vec4(0.0f, static_cast<float>(res.totalTime), 0.0f, 0.0f);
+            vkCmdPushConstants(cmd, res.pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(pcs), &pcs);
+
+            vkCmdBindVertexBuffers(cmd, 0, 1, &res.planeVertexBuffer, offsets);
+            vkCmdBindIndexBuffer(cmd, res.planeIndexBuffer, 0, VK_INDEX_TYPE_UINT16);
+            vkCmdDrawIndexed(cmd, res.planeIndexCount, 1, 0, 0, 0);
+        }
 
         std::vector<int> opaqueIdx, transparentIdx;
         for (int i = 0; i < res.objectCount; ++i)
@@ -845,12 +893,18 @@ namespace shape_renderer
             vkCmdPushConstants(cmd, res.pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
                                0, sizeof(pcs), &pcs);
 
+            vkCmdBindVertexBuffers(cmd, 0, 1, &res.vertexBuffer, offsets);
+            vkCmdBindIndexBuffer(cmd, res.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+
             vkCmdDrawIndexed(cmd, res.indexCount, 1, 0, 0, 0);
         };
 
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, res.pipeline);
-        for (int i : opaqueIdx)
-            drawOne(i);
+        if (!opaqueIdx.empty())
+        {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, res.pipeline);
+            for (int i : opaqueIdx)
+                drawOne(i);
+        }
 
         if (!transparentIdx.empty())
         {
@@ -994,6 +1048,11 @@ namespace shape_renderer
             vmaDestroyBuffer(ctx.allocator, res.cubeIndexBuffer, res.cubeIndexAlloc);
         if (res.coneVertexBuffer)
             vmaDestroyBuffer(ctx.allocator, res.coneVertexBuffer, res.coneVertexAlloc);
+
+        if (res.planeVertexBuffer)
+            vmaDestroyBuffer(ctx.allocator, res.planeVertexBuffer, res.planeVertexAlloc);
+        if (res.planeIndexBuffer)
+            vmaDestroyBuffer(ctx.allocator, res.planeIndexBuffer, res.planeIndexAlloc);
     }
 
     Resources &params() { return res; }

@@ -144,6 +144,16 @@ namespace shape_renderer
         uint32_t coneVertexCapacity = 0;
         uint32_t coneVertexWritten = 0;
 
+        VkBuffer planeVertexBuffer = VK_NULL_HANDLE;
+        VmaAllocation planeVertexAlloc = VK_NULL_HANDLE;
+        VkBuffer planeIndexBuffer = VK_NULL_HANDLE;
+        VmaAllocation planeIndexAlloc = VK_NULL_HANDLE;
+        uint32_t planeIndexCount = 0;
+
+        VkDescriptorSet floorDescriptorSet = VK_NULL_HANDLE;
+        uint32_t floorUboDynamicOffset = 0;
+        glm::mat4 floorModel{1.0f};
+
         static constexpr int MAX_OBJECTS = 3;
         GameObject objects[MAX_OBJECTS];
         int objectCount = 1;
