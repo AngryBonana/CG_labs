@@ -389,7 +389,7 @@ Context context;
 bool initialize(GLFWwindow* const window) {
 	vkb::InstanceBuilder ib;
 
-	auto ibr = ib.require_api_version(VK_MAKE_VERSION(1, 1, 0))
+	auto ibr = ib.require_api_version(VK_MAKE_VERSION(1, 3, 0))
 				 .request_validation_layers()
 				 .build();
 
@@ -406,8 +406,12 @@ bool initialize(GLFWwindow* const window) {
 
 	vkb::PhysicalDeviceSelector pds(vkb_instance, vk_surface);
 
+	VkPhysicalDeviceVulkan13Features features_13{};
+	features_13.dynamicRendering = VK_TRUE;
+
 	auto pds_result = pds.prefer_gpu_device_type(vkb::PreferredDeviceType::discrete)
 						 .require_present()
+						 .set_required_features_13(features_13)
 						 .select();
 	if (!pds_result) {
 		std::cerr << pds_result.error().message() << '\n';

@@ -9,6 +9,10 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4 dirColor;
     vec4 lightCounts;
     vec4 time;
+    mat4 sunShadowViewProj;
+    vec4 shadowParams;
+    mat4 spotShadowViewProj;
+    vec4 spotShadowParams;
 } scene;
 
 const int MAX_LIGHTS = 64;
@@ -30,6 +34,9 @@ layout(set = 1, binding = 0) uniform ModelUBO {
 layout(set = 2, binding = 0) uniform sampler2D albedoTex;
 layout(set = 2, binding = 1) uniform sampler2D specularTex;
 layout(set = 2, binding = 2) uniform sampler2D emissiveTex;
+
+layout(set = 0, binding = 3) uniform sampler2DShadow sunShadowMap;
+layout(set = 0, binding = 4) uniform sampler2DShadow spotShadowMap;
 
 layout(push_constant) uniform Push {
     vec4 params;
@@ -76,6 +83,31 @@ float inverseSquareAttenuation(float dist, vec3 params) {
     return 1.0 / max(params.x + params.y * dist + params.z * dist * dist, 1e-4);
 }
 
+float sampleShadowPCF(sampler2DShadow shadowMap, vec3 coord, float bias) {
+    vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));
+    float shadow = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            vec2 offset = vec2(float(x), float(y)) * texel;
+            shadow += texture(shadowMap, vec3(coord.xy + offset, coord.z - bias));
+        }
+    }
+    return shadow / 9.0;
+}
+
+float sampleShadow(sampler2DShadow shadowMap, mat4 viewProj, vec3 worldPos, float bias) {
+    vec4 lightClip = viewProj * vec4(worldPos, 1.0);
+    if (lightClip.w <= 0.0) return 1.0;
+
+    vec3 ndc = lightClip.xyz / lightClip.w;
+    if (ndc.z <= 0.0 || ndc.z >= 1.0) return 1.0;
+
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
+
+    return sampleShadowPCF(shadowMap, vec3(uv, ndc.z), bias);
+}
+
 void main() {
     vec3 N = normalize(vNormal);
     vec3 V = normalize(scene.cameraPos.xyz - vWorldPos);
@@ -95,10 +127,16 @@ void main() {
 
     vec3 result = albedo * scene.ambient.rgb * scene.ambient.a;
 
+    float sunShadow = 1.0;
+    if (scene.shadowParams.x > 0.5) {
+        sunShadow = sampleShadow(sunShadowMap, scene.sunShadowViewProj, vWorldPos,
+                                 scene.shadowParams.y);
+    }
+
     {
         vec3 L = normalize(-scene.dirDirection.xyz);
         result += blinnPhong(N, V, L, scene.dirColor.rgb, scene.dirColor.a,
-                             1.0, albedo, specColor, shininess);
+                             1.0, albedo, specColor, shininess) * sunShadow;
     }
 
     int pointCount = int(scene.lightCounts.x);
@@ -136,8 +174,13 @@ void main() {
         if (spotFactor <= 0.0) continue;
 
         float att = inverseSquareAttenuation(dist, spotLights.lights[i].params.xyz);
+        float shadowFactor = 1.0;
+        if (scene.spotShadowParams.x > 0.5 && i == int(scene.spotShadowParams.y)) {
+            shadowFactor = sampleShadow(spotShadowMap, scene.spotShadowViewProj, vWorldPos,
+                                        scene.spotShadowParams.z);
+        }
         result += blinnPhong(N, V, L, spotLights.lights[i].color.rgb, intensity,
-                             att * spotFactor, albedo, specColor, shininess);
+                             att * spotFactor, albedo, specColor, shininess) * shadowFactor;
     }
 
     vec3 emissive = texture(emissiveTex, vUV).rgb;

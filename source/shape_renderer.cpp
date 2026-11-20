@@ -127,6 +127,187 @@ namespace shape_renderer
             return (s + align - 1) & ~(align - 1);
         }
 
+        glm::mat4 vulkanCorrectionMatrix()
+        {
+            return glm::mat4(
+                glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
+                glm::vec4(0.0f, -1.0f, 0.0f, 0.0f),
+                glm::vec4(0.0f, 0.0f, 0.5f, 0.0f),
+                glm::vec4(0.0f, 0.0f, 0.5f, 1.0f));
+        }
+
+        VkFormat selectShadowFormat(VkPhysicalDevice physicalDevice)
+        {
+            const VkFormat candidates[] = {
+                VK_FORMAT_D32_SFLOAT,
+                VK_FORMAT_D16_UNORM,
+            };
+
+            const VkFormatFeatureFlags required =
+                VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+
+            for (VkFormat format : candidates)
+            {
+                VkFormatProperties properties{};
+                vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &properties);
+                if ((properties.optimalTilingFeatures & required) == required)
+                    return format;
+            }
+
+            return VK_FORMAT_UNDEFINED;
+        }
+
+        bool createShadowImage(uint32_t size, VkFormat format,
+                               VkImage &image, VmaAllocation &alloc, VkImageView &view)
+        {
+            auto &ctx = graphics::internal::context;
+
+            VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+            ici.imageType = VK_IMAGE_TYPE_2D;
+            ici.format = format;
+            ici.extent = {size, size, 1};
+            ici.mipLevels = 1;
+            ici.arrayLayers = 1;
+            ici.samples = VK_SAMPLE_COUNT_1_BIT;
+            ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+            ici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+            VmaAllocationCreateInfo allocationInfo{};
+            allocationInfo.usage = VMA_MEMORY_USAGE_AUTO;
+
+            if (vmaCreateImage(ctx.allocator, &ici, &allocationInfo,
+                               &image, &alloc, nullptr) != VK_SUCCESS)
+            {
+                std::cerr << "Failed to create shadow map image\n";
+                return false;
+            }
+
+            VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            vci.image = image;
+            vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            vci.format = format;
+            vci.subresourceRange = {
+                VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+
+            if (vkCreateImageView(ctx.device, &vci, nullptr, &view) != VK_SUCCESS)
+            {
+                std::cerr << "Failed to create shadow map image view\n";
+                return false;
+            }
+
+            return true;
+        }
+
+        void transitionShadowImage(VkCommandBuffer cmd, VkImage image,
+                                   VkImageLayout oldLayout, VkImageLayout newLayout)
+        {
+            VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            barrier.oldLayout = oldLayout;
+            barrier.newLayout = newLayout;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = image;
+            barrier.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+
+            VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            VkPipelineStageFlags dstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+
+            if (newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            {
+                barrier.srcAccessMask =
+                    (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED) ? 0 : VK_ACCESS_SHADER_READ_BIT;
+                barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+                if (oldLayout != VK_IMAGE_LAYOUT_UNDEFINED)
+                    srcStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+                dstStage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                           VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            }
+            else if (newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+            {
+                barrier.srcAccessMask =
+                    (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED)
+                        ? 0
+                        : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+                if (oldLayout != VK_IMAGE_LAYOUT_UNDEFINED)
+                    srcStage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                               VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            }
+
+            vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0,
+                                 0, nullptr, 0, nullptr, 1, &barrier);
+        }
+
+        VkSampler createShadowSampler()
+        {
+            auto &ctx = graphics::internal::context;
+
+            VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+            sci.magFilter = VK_FILTER_LINEAR;
+            sci.minFilter = VK_FILTER_LINEAR;
+            sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+            sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+            sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+            sci.anisotropyEnable = VK_FALSE;
+            sci.maxAnisotropy = 1.0f;
+            sci.compareEnable = VK_TRUE;
+            sci.compareOp = VK_COMPARE_OP_LESS;
+            sci.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+            sci.unnormalizedCoordinates = VK_FALSE;
+
+            VkSampler sampler = VK_NULL_HANDLE;
+            if (vkCreateSampler(ctx.device, &sci, nullptr, &sampler) != VK_SUCCESS)
+                std::cerr << "Failed to create shadow comparison sampler\n";
+            return sampler;
+        }
+
+        glm::mat4 computeSunShadowMatrix(const glm::vec3 &lightDirection, float halfExtent)
+        {
+            glm::vec3 dir = lightDirection;
+            if (glm::length(dir) < 1e-4f)
+                dir = glm::vec3(0.0f, -1.0f, 0.0f);
+            dir = glm::normalize(dir);
+
+            const glm::vec3 center(0.0f);
+            const float distance = 20.0f;
+            glm::vec3 eye = center - dir * distance;
+
+            glm::vec3 up = (std::abs(glm::dot(dir, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.99f)
+                               ? glm::vec3(0.0f, 0.0f, 1.0f)
+                               : glm::vec3(0.0f, 1.0f, 0.0f);
+
+            glm::mat4 view = glm::lookAt(eye, center, up);
+            glm::mat4 proj = glm::ortho(-halfExtent, halfExtent,
+                                        -halfExtent, halfExtent,
+                                        0.1f, 50.0f);
+            proj = vulkanCorrectionMatrix() * proj;
+            return proj * view;
+        }
+
+        glm::mat4 computeSpotShadowMatrix(const SpotLightData &light)
+        {
+            glm::vec3 dir = light.direction;
+            if (glm::length(dir) < 1e-4f)
+                dir = glm::vec3(0.0f, -1.0f, 0.0f);
+            dir = glm::normalize(dir);
+
+            glm::vec3 up = (std::abs(glm::dot(dir, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.99f)
+                               ? glm::vec3(0.0f, 0.0f, 1.0f)
+                               : glm::vec3(0.0f, 1.0f, 0.0f);
+
+            glm::mat4 view = glm::lookAt(light.position, light.position + dir, up);
+            float fovDeg = glm::clamp(2.0f * light.outerAngleDeg + 2.0f, 10.0f, 160.0f);
+            glm::mat4 proj = glm::perspective(glm::radians(fovDeg), 1.0f, 0.05f, 50.0f);
+            proj = vulkanCorrectionMatrix() * proj;
+            return proj * view;
+        }
+
         Material createMaterial(const std::string &name,
                                 const std::string &albedoPath,
                                 const std::string &specularPath,
@@ -160,7 +341,7 @@ namespace shape_renderer
     {
         auto &ctx = graphics::internal::context;
 
-        VkDescriptorSetLayoutBinding sceneBindings[3]{};
+        VkDescriptorSetLayoutBinding sceneBindings[5]{};
         sceneBindings[0].binding = 0;
         sceneBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         sceneBindings[0].descriptorCount = 1;
@@ -176,8 +357,18 @@ namespace shape_renderer
         sceneBindings[2].descriptorCount = 1;
         sceneBindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+        sceneBindings[3].binding = 3;
+        sceneBindings[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        sceneBindings[3].descriptorCount = 1;
+        sceneBindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        sceneBindings[4].binding = 4;
+        sceneBindings[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        sceneBindings[4].descriptorCount = 1;
+        sceneBindings[4].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
         VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        dslci.bindingCount = 3;
+        dslci.bindingCount = 5;
         dslci.pBindings = sceneBindings;
         if (vkCreateDescriptorSetLayout(ctx.device, &dslci, nullptr, &res.sceneSetLayout) != VK_SUCCESS)
         {
@@ -217,6 +408,62 @@ namespace shape_renderer
             return false;
         }
 
+        res.shadowFormat = selectShadowFormat(ctx.physical_device);
+        if (res.shadowFormat == VK_FORMAT_UNDEFINED)
+        {
+            std::cerr << "No supported format found for shadow maps\n";
+            return false;
+        }
+
+        if (!createShadowImage(res.shadowMapSize, res.shadowFormat,
+                               res.sunShadowImage, res.sunShadowAlloc, res.sunShadowView) ||
+            !createShadowImage(res.shadowMapSize, res.shadowFormat,
+                               res.spotShadowImage, res.spotShadowAlloc, res.spotShadowView))
+        {
+            return false;
+        }
+
+        res.shadowSampler = createShadowSampler();
+        if (res.shadowSampler == VK_NULL_HANDLE)
+            return false;
+
+        {
+            VkCommandPoolCreateInfo cpci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+            cpci.queueFamilyIndex = ctx.graphics_queue_index;
+            VkCommandPool tmpPool = VK_NULL_HANDLE;
+            vkCreateCommandPool(ctx.device, &cpci, nullptr, &tmpPool);
+
+            VkCommandBufferAllocateInfo cbai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            cbai.commandPool = tmpPool;
+            cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cbai.commandBufferCount = 1;
+            VkCommandBuffer tmpCmd = VK_NULL_HANDLE;
+            vkAllocateCommandBuffers(ctx.device, &cbai, &tmpCmd);
+
+            VkCommandBufferBeginInfo cbbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            vkBeginCommandBuffer(tmpCmd, &cbbi);
+
+            transitionShadowImage(tmpCmd, res.sunShadowImage,
+                                  VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            transitionShadowImage(tmpCmd, res.spotShadowImage,
+                                  VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+            vkEndCommandBuffer(tmpCmd);
+
+            VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            si.commandBufferCount = 1;
+            si.pCommandBuffers = &tmpCmd;
+            vkQueueSubmit(ctx.graphics_queue, 1, &si, VK_NULL_HANDLE);
+            vkQueueWaitIdle(ctx.graphics_queue);
+            vkDestroyCommandPool(ctx.device, tmpPool, nullptr);
+
+            res.sunShadowLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            res.spotShadowLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+
         createBuffer(sizeof(SceneUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                      res.sceneUBO, res.sceneUBOAlloc, &res.sceneUBOMapped);
 
@@ -231,10 +478,11 @@ namespace shape_renderer
         VkDescriptorPoolSize scenePoolSizes[] = {
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
             {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2},
+            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2},
         };
         VkDescriptorPoolCreateInfo spci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         spci.maxSets = 1;
-        spci.poolSizeCount = 2;
+        spci.poolSizeCount = 3;
         spci.pPoolSizes = scenePoolSizes;
         if (vkCreateDescriptorPool(ctx.device, &spci, nullptr, &res.scenePool) != VK_SUCCESS)
         {
@@ -255,8 +503,12 @@ namespace shape_renderer
         VkDescriptorBufferInfo sceneUBOInfo{res.sceneUBO, 0, sizeof(SceneUBO)};
         VkDescriptorBufferInfo pointInfo{res.pointSSBO, 0, VK_WHOLE_SIZE};
         VkDescriptorBufferInfo spotInfo{res.spotSSBO, 0, VK_WHOLE_SIZE};
+        VkDescriptorImageInfo sunShadowInfo{res.shadowSampler, res.sunShadowView,
+                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkDescriptorImageInfo spotShadowInfo{res.shadowSampler, res.spotShadowView,
+                                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 
-        VkWriteDescriptorSet sceneWrites[3]{};
+        VkWriteDescriptorSet sceneWrites[5]{};
         sceneWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         sceneWrites[0].dstSet = res.sceneSet;
         sceneWrites[0].dstBinding = 0;
@@ -278,7 +530,21 @@ namespace shape_renderer
         sceneWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         sceneWrites[2].pBufferInfo = &spotInfo;
 
-        vkUpdateDescriptorSets(ctx.device, 3, sceneWrites, 0, nullptr);
+        sceneWrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        sceneWrites[3].dstSet = res.sceneSet;
+        sceneWrites[3].dstBinding = 3;
+        sceneWrites[3].descriptorCount = 1;
+        sceneWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        sceneWrites[3].pImageInfo = &sunShadowInfo;
+
+        sceneWrites[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        sceneWrites[4].dstSet = res.sceneSet;
+        sceneWrites[4].dstBinding = 4;
+        sceneWrites[4].descriptorCount = 1;
+        sceneWrites[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        sceneWrites[4].pImageInfo = &spotShadowInfo;
+
+        vkUpdateDescriptorSets(ctx.device, 5, sceneWrites, 0, nullptr);
 
         VkPhysicalDeviceProperties props{};
         vkGetPhysicalDeviceProperties(ctx.physical_device, &props);
@@ -422,6 +688,18 @@ namespace shape_renderer
             obj.materialIndex = std::min<int>(i, static_cast<int>(res.materials.size()) - 1);
         }
         res.objects[0].nonTrivialSampling = true;
+
+        {
+            SpotLightData spot;
+            spot.position = glm::vec3(2.5f, 4.0f, 2.5f);
+            spot.direction = glm::normalize(glm::vec3(-2.5f, -5.0f, -2.5f));
+            spot.color = glm::vec3(1.0f, 0.85f, 0.6f);
+            spot.intensity = 5.0f;
+            spot.innerAngleDeg = 12.0f;
+            spot.outerAngleDeg = 24.0f;
+            res.spotLights.push_back(spot);
+            res.spotShadowLightIndex = 0;
+        }
 
         MeshData mesh = makePyramid();
         res.indexCount = static_cast<uint32_t>(mesh.indices.size());
@@ -574,6 +852,85 @@ namespace shape_renderer
         vkDestroyShaderModule(ctx.device, vert, nullptr);
         vkDestroyShaderModule(ctx.device, frag, nullptr);
 
+        VkShaderModule shadowVert = loadShader("shaders/shadow.vert.spv");
+        if (shadowVert == VK_NULL_HANDLE)
+            return false;
+
+        VkPipelineShaderStageCreateInfo shadowStage{};
+        shadowStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        shadowStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        shadowStage.module = shadowVert;
+        shadowStage.pName = "main";
+
+        VkPushConstantRange shadowPushRange{};
+        shadowPushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        shadowPushRange.offset = 0;
+        shadowPushRange.size = sizeof(glm::mat4);
+
+        VkPipelineLayoutCreateInfo shadowPlci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        shadowPlci.setLayoutCount = 1;
+        shadowPlci.pSetLayouts = &res.modelSetLayout;
+        shadowPlci.pushConstantRangeCount = 1;
+        shadowPlci.pPushConstantRanges = &shadowPushRange;
+        if (vkCreatePipelineLayout(ctx.device, &shadowPlci, nullptr, &res.shadowPipelineLayout) != VK_SUCCESS)
+        {
+            std::cerr << "Failed to create shadow pipeline layout\n";
+            return false;
+        }
+
+        VkPipelineRenderingCreateInfo shadowRendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+        shadowRendering.colorAttachmentCount = 0;
+        shadowRendering.pColorAttachmentFormats = nullptr;
+        shadowRendering.depthAttachmentFormat = res.shadowFormat;
+        shadowRendering.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
+
+        VkPipelineDepthStencilStateCreateInfo shadowDsci{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+        shadowDsci.depthTestEnable = VK_TRUE;
+        shadowDsci.depthWriteEnable = VK_TRUE;
+        shadowDsci.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+        shadowDsci.stencilTestEnable = VK_FALSE;
+
+        VkPipelineRasterizationStateCreateInfo shadowRsci = rsci;
+        shadowRsci.depthBiasEnable = VK_TRUE;
+
+        VkPipelineColorBlendStateCreateInfo shadowCbci{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        shadowCbci.attachmentCount = 0;
+        shadowCbci.pAttachments = nullptr;
+
+        VkDynamicState shadowDynStates[] = {
+            VK_DYNAMIC_STATE_VIEWPORT,
+            VK_DYNAMIC_STATE_SCISSOR,
+            VK_DYNAMIC_STATE_DEPTH_BIAS,
+        };
+        VkPipelineDynamicStateCreateInfo shadowDssci{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+        shadowDssci.dynamicStateCount = 3;
+        shadowDssci.pDynamicStates = shadowDynStates;
+
+        VkGraphicsPipelineCreateInfo shadowGpci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        shadowGpci.pNext = &shadowRendering;
+        shadowGpci.stageCount = 1;
+        shadowGpci.pStages = &shadowStage;
+        shadowGpci.pVertexInputState = &vici;
+        shadowGpci.pInputAssemblyState = &iaci;
+        shadowGpci.pViewportState = &vsci;
+        shadowGpci.pRasterizationState = &shadowRsci;
+        shadowGpci.pMultisampleState = &msci;
+        shadowGpci.pDepthStencilState = &shadowDsci;
+        shadowGpci.pColorBlendState = &shadowCbci;
+        shadowGpci.pDynamicState = &shadowDssci;
+        shadowGpci.layout = res.shadowPipelineLayout;
+        shadowGpci.renderPass = VK_NULL_HANDLE;
+        shadowGpci.subpass = 0;
+
+        if (vkCreateGraphicsPipelines(ctx.device, VK_NULL_HANDLE, 1, &shadowGpci,
+                                      nullptr, &res.shadowPipeline) != VK_SUCCESS)
+        {
+            std::cerr << "Failed to create shadow pipeline\n";
+            return false;
+        }
+
+        vkDestroyShaderModule(ctx.device, shadowVert, nullptr);
+
         VkShaderModule vvert = loadShader("shaders/vis.vert.spv");
         VkShaderModule vfrag = loadShader("shaders/vis.frag.spv");
         if (vvert == VK_NULL_HANDLE || vfrag == VK_NULL_HANDLE)
@@ -688,12 +1045,23 @@ namespace shape_renderer
             proj = glm::ortho(-w, w, -h, h, 0.1f, 100.0f);
         }
 
-        const glm::mat4 vulkanCorrection(
-            glm::vec4(1.0f, 0.0f, 0.0f, 0.0f),
-            glm::vec4(0.0f, -1.0f, 0.0f, 0.0f),
-            glm::vec4(0.0f, 0.0f, 0.5f, 0.0f),
-            glm::vec4(0.0f, 0.0f, 0.5f, 1.0f));
+        const glm::mat4 vulkanCorrection = vulkanCorrectionMatrix();
         proj = vulkanCorrection * proj;
+
+        if (res.spotShadowLightIndex >= static_cast<int>(res.spotLights.size()))
+            res.spotShadowLightIndex = -1;
+
+        res.sunShadowViewProj = computeSunShadowMatrix(res.dirLightDirection,
+                                                       res.shadowOrthoHalfExtent);
+
+        const bool spotShadowActive =
+            res.spotShadowLightIndex >= 0 &&
+            res.spotShadowLightIndex < static_cast<int>(res.spotLights.size());
+
+        if (spotShadowActive)
+            res.spotShadowViewProj = computeSpotShadowMatrix(res.spotLights[res.spotShadowLightIndex]);
+        else
+            res.spotShadowViewProj = glm::mat4(1.0f);
 
         uint32_t pc = std::min<uint32_t>((uint32_t)res.pointLights.size(), Resources::MAX_LIGHTS);
         uint32_t sc = std::min<uint32_t>((uint32_t)res.spotLights.size(), Resources::MAX_LIGHTS);
@@ -707,6 +1075,18 @@ namespace shape_renderer
         scene.dirColor = glm::vec4(res.dirLightColor, res.dirLightIntensity);
         scene.lightCounts = glm::vec4((float)pc, (float)sc, 0.0f, 0.0f);
         scene.time = glm::vec4((float)res.totalTime, 0.0f, 0.0f, 0.0f);
+        scene.sunShadowViewProj = res.sunShadowViewProj;
+        scene.shadowParams = glm::vec4(res.sunShadowsEnabled ? 1.0f : 0.0f,
+                                       res.shadowDepthBias,
+                                       static_cast<float>(res.shadowMapSize),
+                                       0.0f);
+        scene.spotShadowViewProj = res.spotShadowViewProj;
+        scene.spotShadowParams = glm::vec4(spotShadowActive ? 1.0f : 0.0f,
+                                           spotShadowActive
+                                               ? static_cast<float>(res.spotShadowLightIndex)
+                                               : -1.0f,
+                                           res.shadowDepthBias,
+                                           0.0f);
         std::memcpy(res.sceneUBOMapped, &scene, sizeof(scene));
 
         auto *pOut = static_cast<PointLight *>(res.pointSSBOMapped);
@@ -820,6 +1200,97 @@ namespace shape_renderer
         }
     }
 
+
+    void recordShadowMaps(VkCommandBuffer cmd)
+    {
+        auto &ctx = graphics::internal::context;
+
+        if (res.shadowPipeline == VK_NULL_HANDLE)
+            return;
+
+        auto recordPass = [&](VkImage image, VkImageLayout &layout,
+                              VkImageView view, const glm::mat4 &viewProj)
+        {
+            transitionShadowImage(cmd, image, layout,
+                                  VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+            layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+            VkRenderingAttachmentInfo depthAttachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+            depthAttachment.imageView = view;
+            depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            depthAttachment.clearValue.depthStencil = {1.0f, 0};
+
+            VkRenderingInfo renderingInfo{VK_STRUCTURE_TYPE_RENDERING_INFO};
+            renderingInfo.renderArea = {{0, 0}, {res.shadowMapSize, res.shadowMapSize}};
+            renderingInfo.layerCount = 1;
+            renderingInfo.colorAttachmentCount = 0;
+            renderingInfo.pColorAttachments = nullptr;
+            renderingInfo.pDepthAttachment = &depthAttachment;
+
+            vkCmdBeginRendering(cmd, &renderingInfo);
+
+            VkViewport viewport{0.0f, 0.0f,
+                                static_cast<float>(res.shadowMapSize),
+                                static_cast<float>(res.shadowMapSize),
+                                0.0f, 1.0f};
+            VkRect2D scissor{{0, 0}, {res.shadowMapSize, res.shadowMapSize}};
+            vkCmdSetViewport(cmd, 0, 1, &viewport);
+            vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, res.shadowPipeline);
+            vkCmdSetDepthBias(cmd, res.shadowConstantBias, 0.0f, res.shadowSlopeBias);
+            vkCmdPushConstants(cmd, res.shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+                               0, sizeof(glm::mat4), &viewProj);
+
+            VkDeviceSize offsets[] = {0};
+
+            auto drawMesh = [&](uint32_t dynamicOffset, VkBuffer vertexBuffer,
+                                VkBuffer indexBuffer, uint32_t indexCount)
+            {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        res.shadowPipelineLayout, 0, 1,
+                                        &res.modelSet, 1, &dynamicOffset);
+                vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer, offsets);
+                vkCmdBindIndexBuffer(cmd, indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+                vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0);
+            };
+
+            drawMesh(res.floorUboDynamicOffset, res.planeVertexBuffer,
+                     res.planeIndexBuffer, res.planeIndexCount);
+
+            for (int i = 0; i < res.objectCount; ++i)
+            {
+                const auto &obj = res.objects[i];
+                if (obj.alpha < 0.999f)
+                    continue;
+
+                drawMesh(obj.uboDynamicOffset, res.vertexBuffer,
+                         res.indexBuffer, res.indexCount);
+            }
+
+            vkCmdEndRendering(cmd);
+
+            transitionShadowImage(cmd, image, layout,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        };
+
+        if (res.sunShadowsEnabled)
+            recordPass(res.sunShadowImage, res.sunShadowLayout,
+                       res.sunShadowView, res.sunShadowViewProj);
+
+        const bool spotShadowActive =
+            res.spotShadowLightIndex >= 0 &&
+            res.spotShadowLightIndex < static_cast<int>(res.spotLights.size());
+
+        if (spotShadowActive)
+            recordPass(res.spotShadowImage, res.spotShadowLayout,
+                       res.spotShadowView, res.spotShadowViewProj);
+
+        (void)ctx;
+    }
 
     void record(VkCommandBuffer cmd, uint32_t imageIndex)
     {
@@ -992,10 +1463,14 @@ namespace shape_renderer
             vkDestroyPipeline(ctx.device, res.visTriPipeline, nullptr);
         if (res.visLinePipeline)
             vkDestroyPipeline(ctx.device, res.visLinePipeline, nullptr);
+        if (res.shadowPipeline)
+            vkDestroyPipeline(ctx.device, res.shadowPipeline, nullptr);
         if (res.pipelineLayout)
             vkDestroyPipelineLayout(ctx.device, res.pipelineLayout, nullptr);
         if (res.visPipelineLayout)
             vkDestroyPipelineLayout(ctx.device, res.visPipelineLayout, nullptr);
+        if (res.shadowPipelineLayout)
+            vkDestroyPipelineLayout(ctx.device, res.shadowPipelineLayout, nullptr);
 
         for (auto &m : res.materials)
         {
@@ -1030,6 +1505,17 @@ namespace shape_renderer
             vkDestroyDescriptorPool(ctx.device, res.scenePool, nullptr);
         if (res.sceneSetLayout)
             vkDestroyDescriptorSetLayout(ctx.device, res.sceneSetLayout, nullptr);
+
+        if (res.shadowSampler)
+            vkDestroySampler(ctx.device, res.shadowSampler, nullptr);
+        if (res.sunShadowView)
+            vkDestroyImageView(ctx.device, res.sunShadowView, nullptr);
+        if (res.sunShadowImage)
+            vmaDestroyImage(ctx.allocator, res.sunShadowImage, res.sunShadowAlloc);
+        if (res.spotShadowView)
+            vkDestroyImageView(ctx.device, res.spotShadowView, nullptr);
+        if (res.spotShadowImage)
+            vmaDestroyImage(ctx.allocator, res.spotShadowImage, res.spotShadowAlloc);
 
         if (res.sceneUBO)
             vmaDestroyBuffer(ctx.allocator, res.sceneUBO, res.sceneUBOAlloc);

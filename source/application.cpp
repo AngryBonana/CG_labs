@@ -51,6 +51,14 @@ void update(double time) {
     ImGui::SliderFloat("Dir intensity", &p.dirLightIntensity, 0.0f, 5.0f);
 
     ImGui::Separator();
+    ImGui::Text("Sun shadow map");
+    ImGui::Checkbox("Enable sun shadows", &p.sunShadowsEnabled);
+    ImGui::SliderFloat("Shadow ortho half-size", &p.shadowOrthoHalfExtent, 1.0f, 20.0f);
+    ImGui::SliderFloat("Depth bias", &p.shadowDepthBias, 0.0f, 0.01f, "%.5f");
+    ImGui::SliderFloat("Depth bias slope", &p.shadowSlopeBias, 0.0f, 5.0f, "%.2f");
+    ImGui::SliderFloat("Depth bias constant", &p.shadowConstantBias, 0.0f, 5.0f, "%.2f");
+
+    ImGui::Separator();
     ImGui::Checkbox("Show light gizmos", &p.showLightGizmos);
     ImGui::End();
 
@@ -98,6 +106,11 @@ void update(double time) {
         ImGui::SliderFloat3("Direction", &l.direction.x, -1.0f, 1.0f);
         ImGui::ColorEdit3("Color", &l.color.x);
         ImGui::SliderFloat("Intensity", &l.intensity, 0.0f, 20.0f);
+        {
+            bool castsShadow = (p.spotShadowLightIndex == i);
+            if (ImGui::Checkbox("Cast shadow", &castsShadow))
+                p.spotShadowLightIndex = castsShadow ? i : -1;
+        }
         ImGui::SliderFloat("Inner angle", &l.innerAngleDeg, 0.0f, 89.0f);
         ImGui::SliderFloat("Outer angle", &l.outerAngleDeg, 0.0f, 89.0f);
         if (l.outerAngleDeg < l.innerAngleDeg) l.outerAngleDeg = l.innerAngleDeg;
@@ -107,7 +120,13 @@ void update(double time) {
         if (ImGui::Button("Remove")) removeIdx = i;
         ImGui::PopID();
     }
-    if (removeIdx >= 0) p.spotLights.erase(p.spotLights.begin() + removeIdx);
+    if (removeIdx >= 0) {
+        if (p.spotShadowLightIndex == removeIdx)
+            p.spotShadowLightIndex = -1;
+        else if (p.spotShadowLightIndex > removeIdx)
+            --p.spotShadowLightIndex;
+        p.spotLights.erase(p.spotLights.begin() + removeIdx);
+    }
     ImGui::End();
 
     ImGui::Begin("Objects");
@@ -183,6 +202,8 @@ void render(const graphics::internal::FrameData& fd) {
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkResetCommandBuffer(fd.command_buffer, 0);
     vkBeginCommandBuffer(fd.command_buffer, &bi);
+
+    shape_renderer::recordShadowMaps(fd.command_buffer);
 
     VkClearValue clears[2]{};
     clears[0].color = {{0.02f, 0.02f, 0.03f, 1.0f}};

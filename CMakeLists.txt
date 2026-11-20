@@ -129,6 +129,7 @@ if(GLSLC_FOUND)
 
 	compile_shader(shape.vert)
 	compile_shader(shape.frag)
+	compile_shader(shadow.vert)
 	compile_shader(vis.vert)
 	compile_shader(vis.frag)
 

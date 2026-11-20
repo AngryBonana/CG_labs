@@ -14,6 +14,12 @@ struct SceneUBO
 
     alignas(16) glm::vec4 lightCounts;
     alignas(16) glm::vec4 time;
+
+    alignas(16) glm::mat4 sunShadowViewProj;
+    alignas(16) glm::vec4 shadowParams;
+
+    alignas(16) glm::mat4 spotShadowViewProj;
+    alignas(16) glm::vec4 spotShadowParams;
 };
 
 struct PointLight

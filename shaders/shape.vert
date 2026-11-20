@@ -9,6 +9,10 @@ layout(set = 0, binding = 0) uniform SceneUBO {
     vec4 dirColor;
     vec4 lightCounts;
     vec4 time;
+    mat4 sunShadowViewProj;
+    vec4 shadowParams;
+    mat4 spotShadowViewProj;
+    vec4 spotShadowParams;
 } scene;
 
 layout(set = 1, binding = 0) uniform ModelUBO {

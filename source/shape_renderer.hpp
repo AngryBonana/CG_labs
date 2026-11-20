@@ -88,6 +88,22 @@ namespace shape_renderer
         VkPipeline pipeline = VK_NULL_HANDLE;
         VkPipeline transparentPipeline = VK_NULL_HANDLE;
 
+        VkPipelineLayout shadowPipelineLayout = VK_NULL_HANDLE;
+        VkPipeline shadowPipeline = VK_NULL_HANDLE;
+
+        VkFormat shadowFormat = VK_FORMAT_UNDEFINED;
+        uint32_t shadowMapSize = 2048;
+        VkImage sunShadowImage = VK_NULL_HANDLE;
+        VmaAllocation sunShadowAlloc = VK_NULL_HANDLE;
+        VkImageView sunShadowView = VK_NULL_HANDLE;
+        VkImageLayout sunShadowLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        VkImage spotShadowImage = VK_NULL_HANDLE;
+        VmaAllocation spotShadowAlloc = VK_NULL_HANDLE;
+        VkImageView spotShadowView = VK_NULL_HANDLE;
+        VkImageLayout spotShadowLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkSampler shadowSampler = VK_NULL_HANDLE;
+
         VkPipelineLayout visPipelineLayout = VK_NULL_HANDLE;
         VkPipeline visTriPipeline = VK_NULL_HANDLE;
         VkPipeline visLinePipeline = VK_NULL_HANDLE;
@@ -166,6 +182,16 @@ namespace shape_renderer
         glm::vec3 dirLightColor{1.0f};
         float dirLightIntensity = 1.0f;
 
+        bool sunShadowsEnabled = true;
+        float shadowOrthoHalfExtent = 6.0f;
+        float shadowDepthBias = 0.0015f;
+        float shadowSlopeBias = 1.5f;
+        float shadowConstantBias = 1.25f;
+        int spotShadowLightIndex = -1;
+
+        glm::mat4 sunShadowViewProj{1.0f};
+        glm::mat4 spotShadowViewProj{1.0f};
+
         glm::vec3 ambientColor{1.0f};
         float ambientIntensity = 0.15f;
 
@@ -182,6 +208,7 @@ namespace shape_renderer
     bool initialize();
     void shutdown();
     void update(double dt);
+    void recordShadowMaps(VkCommandBuffer cmd);
     void record(VkCommandBuffer cmd, uint32_t imageIndex);
     Resources& params();
 
